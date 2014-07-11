@@ -2,7 +2,7 @@
 
 ## Requirement
 * FreeBSD or Linux
-* PHP 5.3 +
+* PHP 5.3 to 5.5
 
 ## Installation
 
