@@ -322,7 +322,11 @@ static void epv_init_auto_global(TSRMLS_D)
 																		upload_tmp_dir = zend_ini_string_ex("upload_tmp_dir", 15, 0, &ini_exists);
 																		if(upload_tmp_dir == NULL)
 																		{
+#if (PHP_MAJOR_VERSION == 5) && (PHP_MINOR_VERSION < 5)
 																				upload_tmp_dir = (char *)php_get_temporary_directory();
+#else
+																				upload_tmp_dir = (char *)php_get_temporary_directory(TSRMLS_C);
+#endif
 																		}
 
 
