@@ -26,4 +26,4 @@ $_DELETE will bepredefined when $_SERVER['REQUEST_METHOD'] is DELETE
 $_PUT and $_DELETE bthod support two $_SERVER['CONTENT_TYPE']:    
 "application/x-www-form-urlencoded" and "multipart/form-data"
 
-$FILES will be manipulated when $_SERVER['CONTENT_TYPE'] is "multipart/form-data" and input type is "file"
+$_FILES will be manipulated when $_SERVER['CONTENT_TYPE'] is "multipart/form-data" and input type is "file"
