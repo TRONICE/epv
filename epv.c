@@ -157,7 +157,7 @@ static void epv_init_auto_global(TSRMLS_D)
 				}
 				else if(strncasecmp(Z_STRVAL_P(content_type), "multipart/form-data", 19) == 0)
 				{
-						char *input_data_boundary_end = zend_memnstr(input_data, "\r\n", 2, input_data_end);
+						char *input_data_boundary_end = (char *)zend_memnstr(input_data, "\r\n", 2, input_data_end);
 
 						char *boundary = input_data;
 						*input_data_boundary_end = 0;
@@ -174,7 +174,7 @@ static void epv_init_auto_global(TSRMLS_D)
 						char *input_parameter_string = NULL, *input_parameter_string_old;
 						long current_part_len, current_data_len;
 
-						char *part_end = zend_memnstr(current_input_data, boundary, boundary_len, input_data_end);
+						char *part_end = (char *)zend_memnstr(current_input_data, boundary, boundary_len, input_data_end);
 						while(part_end != NULL)
 						{
 								*part_end = 0; //ignore boundary
@@ -428,7 +428,7 @@ static void epv_init_auto_global(TSRMLS_D)
 								if(current_input_data + current_part_len + boundary_len + 2 <= input_data_end)
 								{
 										current_input_data += current_part_len + boundary_len + 2; //shift to next part and bypass tail "\r\n"
-										part_end = zend_memnstr(current_input_data, boundary, boundary_len, input_data_end);
+										part_end = (char *)zend_memnstr(current_input_data, boundary, boundary_len, input_data_end);
 								}
 								else
 								{
