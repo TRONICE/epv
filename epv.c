@@ -2,547 +2,443 @@
 #include "config.h"
 #endif
 
-
 #include "php.h"
 #include "php_ini.h"
 #include "ext/standard/info.h"
 #include "ext/standard/php_string.h"
 #include "ext/standard/url.h"
 #include "php_epv.h"
-#include "stdio.h"
-#include "php_variables.h"
-#include "php_open_temporary_file.h"
-
-ZEND_DECLARE_MODULE_GLOBALS(epv);
-
-static void epv_register_auto_global(TSRMLS_D);
-static void epv_init_auto_global(TSRMLS_D);
-
-
-static void epv_register_auto_global(TSRMLS_D)
-{
-#if (PHP_MAJOR_VERSION == 5) && (PHP_MINOR_VERSION < 4)
-		zend_register_auto_global("_PUT", sizeof("_PUT") - 1, NULL TSRMLS_CC);
-		zend_register_auto_global("_DELETE", sizeof("_DELETE") - 1, NULL TSRMLS_CC);
-#else
-		zend_register_auto_global("_PUT", sizeof("_PUT") - 1, 0, NULL TSRMLS_CC);
-		zend_register_auto_global("_DELETE", sizeof("_DELETE") - 1, 0, NULL TSRMLS_CC);
-#endif
-}
-
-static void epv_init_auto_global(TSRMLS_D)
-{
-		zval * auto_global_server, ** request_method_pointer, ** content_type_pointer;
-		zval * put, * delete, * request_method, * content_type;
-
-		MAKE_STD_ZVAL(put);
-		array_init(put);
-		zend_hash_add(&EG(symbol_table), "_PUT", 5, &put, sizeof(zval *), NULL);
-		Z_ADDREF_P(put);
-
-		MAKE_STD_ZVAL(delete);
-		array_init(delete);
-		zend_hash_add(&EG(symbol_table), "_DELETE", 8, &delete, sizeof(zval *), NULL);
-		Z_ADDREF_P(delete);
-
-
-#if (PHP_MAJOR_VERSION == 5) && (PHP_MINOR_VERSION < 4)
-		if( (PG(auto_globals_jit) && !PG(register_globals) && !PG(register_long_arrays)) )
-		{
-				zend_is_auto_global(ZEND_STRL("_SERVER") TSRMLS_CC);
-		}
-#else
-		if( PG(auto_globals_jit) )
-		{
-				zend_is_auto_global(ZEND_STRL("_SERVER") TSRMLS_CC);
-		}
-#endif
-
-		auto_global_server = PG(http_globals)[TRACK_VARS_SERVER];
-
-
-		if(zend_hash_find(HASH_OF(auto_global_server), "REQUEST_METHOD", 15, (void **)&request_method_pointer) == FAILURE )
-		{
-				MAKE_STD_ZVAL(request_method);
-				ZVAL_NULL(request_method);
-		}
-		else
-		{
-				Z_ADDREF_P(*request_method_pointer);
-				request_method = *request_method_pointer;
-		}
-
-
-		if(zend_hash_find(HASH_OF(auto_global_server), "CONTENT_TYPE", 13, (void **)&content_type_pointer) == FAILURE )
-		{
-				MAKE_STD_ZVAL(content_type);
-				ZVAL_NULL(content_type);
-		}
-		else
-		{
-				Z_ADDREF_P(*content_type_pointer);
-				content_type = *content_type_pointer;
-		}
-
-
-		if(
-				(!ZVAL_IS_NULL(request_method) && Z_TYPE_P(request_method) == IS_STRING) &&
-				(strcasecmp(Z_STRVAL_P(request_method), "put") == 0 || strcasecmp(Z_STRVAL_P(request_method), "delete") == 0) &&
-				(!ZVAL_IS_NULL(content_type) &&	Z_TYPE_P(content_type) == IS_STRING)
-		)
-		{
-				//Get php://input
-				zval * function, * input_content;
-				zval * php_input, * parse_result;
-				zval * function_params[1];	
-
-				MAKE_STD_ZVAL(function);
-				ZVAL_STRING(function, "file_get_contents", 1);
-
-				MAKE_STD_ZVAL(input_content);
-
-				MAKE_STD_ZVAL(php_input);
-				ZVAL_STRING(php_input, "php://input", 1);
-
-				function_params[0] = php_input;
-
-				if(call_user_function(EG(function_table), NULL, function, input_content, 1, function_params TSRMLS_CC) == FAILURE)
-				{
-						zval_ptr_dtor(&function);
-						zval_ptr_dtor(&input_content);
-						zval_ptr_dtor(&php_input);
-
-						php_error_docref(NULL TSRMLS_CC, E_ERROR, "Could not get php://input");
-				}
-
-				zval_ptr_dtor(&function);
-				zval_ptr_dtor(&php_input);
-
-
-				char * input_data = malloc( Z_STRLEN_P(input_content)  + 1);
-				memcpy(input_data, Z_STRVAL_P(input_content), Z_STRLEN_P(input_content));
-				input_data[Z_STRLEN_P(input_content)] = 0;
-
-				char * input_data_end = input_data + Z_STRLEN_P(input_content);
-
-				zval_ptr_dtor(&input_content);
-
-
-
-
-				if(strncasecmp(Z_STRVAL_P(content_type), "application/x-www-form-urlencoded", 33) == 0)
-				{
-						//Parse data
-						MAKE_STD_ZVAL(parse_result);
-						array_init(parse_result);
-
-						char *input_parameter = estrndup(input_data, strlen(input_data));
-
-						sapi_module.treat_data(PARSE_STRING, input_parameter, parse_result TSRMLS_CC);
-
-
-						if(!ZVAL_IS_NULL(parse_result) && Z_TYPE_P(parse_result) == IS_ARRAY)
-						{
-								if( strcasecmp(Z_STRVAL_P(request_method), "put") == 0)
-								{
-										zend_hash_copy(Z_ARRVAL_P(put), Z_ARRVAL_P(parse_result), (copy_ctor_func_t) zval_add_ref, NULL, sizeof(zval *));
-										zend_hash_add(&EG(symbol_table), "_PUT", 5, &put, sizeof(zval *), NULL);
-								}
-								else if( strcasecmp(Z_STRVAL_P(request_method), "delete") == 0)
-								{
-										zend_hash_copy(Z_ARRVAL_P(delete), Z_ARRVAL_P(parse_result), (copy_ctor_func_t) zval_add_ref, NULL, sizeof(zval *));
-										zend_hash_add(&EG(symbol_table), "_DELETE", 8, &delete, sizeof(zval *), NULL);
-								}
-						}
-				}
-				else if(strncasecmp(Z_STRVAL_P(content_type), "multipart/form-data", 19) == 0)
-				{
-						char *input_data_boundary_end = (char *)zend_memnstr(input_data, "\r\n", 2, input_data_end);
-
-						char *boundary = input_data;
-						*input_data_boundary_end = 0;
-
-						int boundary_len = input_data_boundary_end - input_data;
-
-
-						
-						char *current_input_data = input_data_boundary_end + 2; //bypass tail "\r\n"
-						
-						char header_lower[EPV_BUFFER_SIZE];
-						char *header, *header_end, *data, *header_value;
-						char *data_name, *data_name_end;
-						char *input_parameter_string = NULL, *input_parameter_string_old;
-						long current_part_len, current_data_len;
-
-						char *part_end = (char *)zend_memnstr(current_input_data, boundary, boundary_len, input_data_end);
-						while(part_end != NULL)
-						{
-								*part_end = 0; //ignore boundary
-
-								current_part_len = part_end - current_input_data;
-								if(strcmp(current_input_data + current_part_len - 2, "\r\n") == 0)
-								{
-										*(current_input_data + current_part_len - 2) = 0; //ignore tail "\r\n"
-										current_part_len -= 2; //ignore tail "\r\n"
-								}
-
-								//If this is the last part, break
-								if(strcmp(current_input_data, "--") == 0)
-								{
-										break;
-								}
-
-								if(strncmp(current_input_data, "\r\n", 2) == 0)
-								{
-										current_input_data += 2; //bypass head "\r\n"
-								}
-
-
-
-								if((header_end = strstr(current_input_data, "\r\n\r\n")) != NULL)
-								{
-										*(header_end + 2) = 0; //ignore one tail "\r\n" and leave one tail "\r\n" for sub-header parse
-										header = current_input_data;
-										data = current_input_data + strlen(header) + 2; //bypass left tail "\r\n"
-										current_data_len = part_end - data - 2; //by pass "\r\n
-
-
-										memcpy(header_lower, header, header_end - header);
-										header_lower[header_end - header] = 0;
-										php_strtolower(header_lower, header_end - header);
-
-
-
-										//File
-										if(strstr(header_lower, "filename=\"") != NULL)
-										{
-												zval * files_entry, *uniqid, ** ppzval, * auto_global_files;
-												FILE * file_handler;
-												zend_bool ini_exists;
-
-												char upload_max_filesize_string[EPV_BUFFER_SIZE], tmp_file[EPV_BUFFER_SIZE];
-												char upload_max_filesize_unit;
-
-												char sub_content_disposition[EPV_BUFFER_SIZE], sub_content_type[EPV_BUFFER_SIZE];
-												char *sub_header, *sub_header_end;
-												char *filename, *filename_end, *upload_tmp_dir = NULL, *upload_max_filesize_ini;
-												long upload_max_filesize;
-
-												sub_header = header;
-												sub_header_end = strstr(header, "\r\n");
-												while(sub_header_end != NULL)
-												{
-														memcpy(header_lower, sub_header, sub_header_end - sub_header);
-														header_lower[sub_header_end - sub_header] = 0;
-														php_strtolower(header_lower, sub_header_end - sub_header);
-
-														if(strstr(header_lower, "content-disposition") != NULL)
-														{
-																header_value = strstr(sub_header, ": ");
-																header_value += 2; //bypass ": "
-																memcpy(sub_content_disposition, header_value, sub_header_end - header_value);
-																sub_content_disposition[sub_header_end - header_value] = 0;
-														}
-														else if(strstr(header_lower, "content-type") != NULL)
-														{
-																header_value = strstr(sub_header, ": ");
-																header_value += 2; //bypass ": "
-																memcpy(sub_content_type, header_value, sub_header_end - header_value);
-																sub_content_type[sub_header_end - header_value] = 0;
-														}
-
-														sub_header = sub_header_end + 2; //bypass "\r\n" shift to next sub_header
-														sub_header_end = strstr(sub_header, "\r\n");
-												}
-
-												data_name = strstr(sub_content_disposition, "name=\"");
-
-												if(data_name != NULL)
-												{
-														data_name += 6; //bypass "name=\""
-														data_name_end = strstr(data_name, "\"");
-														*data_name_end = 0; //ignore "\""
-
-
-														filename = strstr(data_name_end + 1, "filename=\"");
-														if(filename != NULL)
-														{
-																filename += 10; //bypass "filename="\"
-																filename_end = strstr(filename, "\"");
-																*filename_end = 0; //ignore "\""
-
-
-																upload_max_filesize_ini = zend_ini_string_ex("upload_max_filesize", 20, 0, &ini_exists);
-
-																long upload_max_filesize_ini_len = strlen(upload_max_filesize_ini);
-																memcpy(upload_max_filesize_string, upload_max_filesize_ini, upload_max_filesize_ini_len);
-																upload_max_filesize_string[upload_max_filesize_ini_len] = 0;
-
-																long upload_max_filesize_string_len = strlen(upload_max_filesize_string);
-																php_strtolower(upload_max_filesize_string, upload_max_filesize_string_len);
-
-																upload_max_filesize_unit = upload_max_filesize_string[upload_max_filesize_string_len - 1]; //get last character
-																upload_max_filesize_string[upload_max_filesize_string_len - 1] = 0; //ignore last character
-
-
-																upload_max_filesize = atoi(upload_max_filesize_string);
-
-																switch(upload_max_filesize_unit)
-																{
-																		case 'g':
-																				upload_max_filesize *= 1024;
-																		case 'm':
-																				upload_max_filesize *= 1024;
-																		case 'k':
-																				upload_max_filesize *= 1024;
-																}
-
-
-
-																//Get $_FILES
-																if(zend_hash_find(&EG(symbol_table), ZEND_STRS("_FILES"), (void **)&ppzval) == FAILURE)
-																{
-																		php_error_docref(NULL TSRMLS_CC, E_ERROR, "Could not get $_FILES");
-																}
-																else
-																{
-																		auto_global_files = *ppzval;
-																}
-
-
-																//Make $_FILES entry
-																MAKE_STD_ZVAL(files_entry);
-																array_init(files_entry);
-																add_assoc_string(files_entry, "name", filename, 1);
-
-
-																//Check upload_max_filesize
-																if(current_data_len <= upload_max_filesize)
-																{
-																		upload_tmp_dir = zend_ini_string_ex("upload_tmp_dir", 15, 0, &ini_exists);
-																		if(upload_tmp_dir == NULL)
-																		{
-#if (PHP_MAJOR_VERSION == 5) && (PHP_MINOR_VERSION < 5)
-																				upload_tmp_dir = (char *)php_get_temporary_directory();
-#else
-																				upload_tmp_dir = (char *)php_get_temporary_directory(TSRMLS_C);
-#endif
-																		}
-
-
-
-
-																		//Get unique id
-																		MAKE_STD_ZVAL(function);
-																		ZVAL_STRING(function, "uniqid", 1);
-
-																		MAKE_STD_ZVAL(uniqid);
-
-																		if(call_user_function(EG(function_table), NULL, function, uniqid, 0, NULL TSRMLS_CC) == FAILURE)
-																		{
-																				zval_ptr_dtor(&function);
-																				zval_ptr_dtor(&uniqid);
-
-																				php_error_docref(NULL TSRMLS_CC, E_ERROR, "Could not get uniqid");
-																		}
-
-																		if(upload_tmp_dir[strlen(upload_tmp_dir) - 1] != '/')
-																		{
-																				sprintf(tmp_file, "%s/%s", upload_tmp_dir, Z_STRVAL_P(uniqid));
-																		}
-																		else
-																		{
-																				sprintf(tmp_file, "%s%s", upload_tmp_dir, Z_STRVAL_P(uniqid));
-																		}
-
-																		zval_ptr_dtor(&function);
-																		zval_ptr_dtor(&uniqid);
-
-
-
-
-																		file_handler = fopen(tmp_file, "wb");
-																		fwrite(data, sizeof(char), current_data_len, file_handler);
-																		fclose(file_handler);
-
-
-																		add_assoc_string(files_entry, "type", sub_content_type, 1);
-																		add_assoc_string(files_entry, "tmp_name", tmp_file, 1);
-																		add_assoc_long(files_entry, "error", 0);
-																		add_assoc_long(files_entry, "size", current_data_len);
-																}
-																else
-																{
-																		add_assoc_null(files_entry, "type");
-																		add_assoc_null(files_entry, "tmp_name");
-																		add_assoc_long(files_entry, "error", 1);
-																		add_assoc_long(files_entry, "size", 0);
-																}
-
-												
-																add_assoc_zval(auto_global_files, data_name, files_entry);
-																Z_ADDREF_P(files_entry);
-																zend_hash_add(&EG(symbol_table), "_FILES", 7, &auto_global_files, sizeof(zval *), NULL);
-																Z_ADDREF_P(auto_global_files);
-
-														}
-												}
-										}
-										//Data
-										else
-										{
-												data_name = strstr(header, "name=\"");
-
-												if(data_name != NULL)
-												{
-														data_name += 6; //bypass name="
-														data_name_end = strstr(data_name, "\"");
-														*data_name_end = 0; //ignore "\""
-
-														long data_name_len = data_name_end - data_name;
-
-
-                            int urlencode_len;
-                            char * urlencode_data = php_url_encode(data, current_data_len, &urlencode_len);
-
-                            if(input_parameter_string != NULL)
-                            {
-                                input_parameter_string_old = input_parameter_string;
-                                //extra 3 characters are & = zero-terminal
-                                input_parameter_string = malloc(strlen(input_parameter_string) + 1 + data_name_len + 1 + urlencode_len + 1);
-                                sprintf( input_parameter_string, "%s&%s=%s", input_parameter_string_old, data_name, urlencode_data );
-                                free(input_parameter_string_old);
-                            }
-                            else
-                            {
-                                //extra 2 characters are = zero-terminal
-                                input_parameter_string = malloc(data_name_len + 1 + urlencode_len + 1);
-                                sprintf( input_parameter_string, "%s=%s", data_name, urlencode_data );
-                            }
-													
-												}
-										}
-								}
-
-
-								if(current_input_data + current_part_len + boundary_len + 2 <= input_data_end)
-								{
-										current_input_data += current_part_len + boundary_len + 2; //shift to next part and bypass tail "\r\n"
-										part_end = (char *)zend_memnstr(current_input_data, boundary, boundary_len, input_data_end);
-								}
-								else
-								{
-										break;
-								}
-								
-						}
-
-					
-						if(input_parameter_string != NULL)
-						{
-								//Parse data
-								MAKE_STD_ZVAL(parse_result);
-								array_init(parse_result);
-
-								char *input_parameter = estrndup(input_parameter_string, strlen(input_parameter_string));
-
-								sapi_module.treat_data(PARSE_STRING, input_parameter, parse_result TSRMLS_CC);
-
-
-								if( strcasecmp(Z_STRVAL_P(request_method), "put") == 0)
-								{
-										zend_hash_copy(Z_ARRVAL_P(put), Z_ARRVAL_P(parse_result), (copy_ctor_func_t) zval_add_ref, NULL, sizeof(zval *));
-										zend_hash_add(&EG(symbol_table), "_PUT", 5, &put, sizeof(zval *), NULL);
-								}
-								else if( strcasecmp(Z_STRVAL_P(request_method), "delete") == 0)
-								{
-										zend_hash_copy(Z_ARRVAL_P(delete), Z_ARRVAL_P(parse_result), (copy_ctor_func_t) zval_add_ref, NULL, sizeof(zval *));
-										zend_hash_add(&EG(symbol_table), "_DELETE", 8, &delete, sizeof(zval *), NULL);
-								}
-
-								free(input_parameter_string);
-						}
-				}
-
-				free(input_data);
-		}
-
-
-		zval_ptr_dtor(&request_method);
-		zval_ptr_dtor(&content_type);
-}
-
-zend_function_entry epv_functions[] = {
-		{NULL, NULL, NULL}
-};
-
-
-#ifdef COMPILE_DL_EPV
-ZEND_GET_MODULE(epv)
-#endif
-
+#include "main/php_variables.h"
+#include "main/php_globals.h"
+#include "main/SAPI.h"
+#include "main/php_streams.h"
+#include "main/rfc1867.h"
+#include "main/php_content_types.h"
+
+ZEND_DECLARE_MODULE_GLOBALS(epv)
+
+/* {{{ PHP_INI
+ */
 PHP_INI_BEGIN()
+	STD_PHP_INI_ENTRY("epv.max_input_size", "0", PHP_INI_PERDIR|PHP_INI_SYSTEM, OnUpdateLong, max_input_size, zend_epv_globals, epv_globals)
 PHP_INI_END()
+/* }}} */
 
-PHP_GINIT_FUNCTION(epv)
+/* {{{ php_epv_init_globals
+ */
+static void php_epv_init_globals(void *epv_globals_ptr)
 {
+	zend_epv_globals *epv_globals = (zend_epv_globals *)epv_globals_ptr;
+	memset(epv_globals, 0, sizeof(zend_epv_globals));
+	epv_globals->max_input_size = 0;
 }
+/* }}} */
 
+/* {{{ epv_read_request_data
+ * Read request body data for PUT/DELETE/PATCH methods
+ * Similar to sapi_read_standard_form_data() for POST
+ */
+static void epv_read_request_data(void)
+{
+	zend_long max_size = EPV_G(max_input_size);
+	zend_long content_length = SG(request_info).content_length;
 
+	/* Check if request_body is already buffered */
+	if (SG(request_info).request_body) {
+		return;
+	}
 
+	/* Check if we have a read_post method */
+	if (!sapi_module.read_post) {
+		return;
+	}
+
+	/* Check max_input_size limit if set (0 = unlimited) */
+	if (max_size > 0 && content_length > max_size) {
+		php_error_docref(NULL, E_WARNING,
+			"Request Content-Length of " ZEND_LONG_FMT " bytes exceeds the limit of " ZEND_LONG_FMT " bytes",
+			content_length, max_size);
+		return;
+	}
+
+	/* Create a temporary stream to buffer the request body */
+	SG(request_info).request_body = php_stream_temp_create_ex(
+		TEMP_STREAM_DEFAULT,
+		SAPI_POST_BLOCK_SIZE,
+		PG(upload_tmp_dir)
+	);
+
+	if (!SG(request_info).request_body) {
+		php_error_docref(NULL, E_WARNING, "Failed to create request body stream");
+		return;
+	}
+
+	/* Read data from SAPI in blocks */
+	for (;;) {
+		char buffer[SAPI_POST_BLOCK_SIZE];
+		size_t read_bytes;
+
+		/* Read one block of data */
+		read_bytes = sapi_read_post_block(buffer, SAPI_POST_BLOCK_SIZE);
+
+		if (read_bytes > 0) {
+			/* Write to the stream */
+			if (php_stream_write(SG(request_info).request_body, buffer, read_bytes) != read_bytes) {
+				/* Write failed, purge the stream */
+				php_stream_truncate_set_size(SG(request_info).request_body, 0);
+				php_error_docref(NULL, E_WARNING, "Request data can't be buffered; all data discarded");
+				break;
+			}
+		}
+
+		/* Check if we've exceeded the limit after reading */
+		if (max_size > 0 && SG(read_post_bytes) > max_size) {
+			php_error_docref(NULL, E_WARNING,
+				"Actual request length does not match Content-Length, and exceeds " ZEND_LONG_FMT " bytes",
+				max_size);
+			break;
+		}
+
+		/* Check if we're done reading */
+		if (read_bytes < SAPI_POST_BLOCK_SIZE) {
+			break;
+		}
+	}
+
+	/* Rewind the stream for reading */
+	php_stream_rewind(SG(request_info).request_body);
+}
+/* }}} */
+
+/* {{{ parse_http_method_data
+ * Parse request body data similar to POST handling
+ * Supports multiple Content-Types: urlencoded and multipart
+ */
+static void parse_http_method_data(zval *arr)
+{
+	const char *content_type = SG(request_info).content_type;
+	sapi_post_entry *post_entry;
+	size_t content_type_length;
+	char *content_type_normalized;
+	char *p;
+	char oldchar = 0;
+	char *saved_content_type_dup = NULL;
+	sapi_post_entry *saved_post_entry = NULL;
+	zval saved_post_array;
+	zend_bool swapped_post_array = 0;
+
+	/* Check if we have a Content-Type */
+	if (!content_type || !*content_type) {
+		/* No Content-Type, cannot determine how to parse data */
+		return;
+	}
+
+	/* Normalize content type - make lowercase and trim parameters */
+	content_type_length = strlen(content_type);
+	content_type_normalized = estrndup(content_type, content_type_length);
+
+	for (p = content_type_normalized; p < content_type_normalized + content_type_length; p++) {
+		switch (*p) {
+			case ';':
+			case ',':
+			case ' ':
+				content_type_length = p - content_type_normalized;
+				oldchar = *p;
+				*p = 0;
+				break;
+			default:
+				*p = tolower(*p);
+				break;
+		}
+	}
+
+	/* Look up the POST content handler */
+	post_entry = zend_hash_str_find_ptr(&SG(known_post_content_types),
+		content_type_normalized, content_type_length);
+
+	if (!post_entry) {
+		/* No handler found for this content type */
+		efree(content_type_normalized);
+		return;
+	}
+
+	/* Restore the original character if we modified it */
+	if (oldchar) {
+		*(p - 1) = oldchar;
+	}
+
+	/* Save current SAPI state (in case it was set by actual POST handling) */
+	saved_post_entry = SG(request_info).post_entry;
+	saved_content_type_dup = SG(request_info).content_type_dup;
+
+	/* Safety check: content_type_dup should be NULL at RINIT stage for PUT/DELETE/PATCH */
+	if (saved_content_type_dup != NULL) {
+		/* This is unexpected - another component has already set this */
+		php_error_docref(NULL, E_WARNING,
+			"EPV: content_type_dup already set before processing %s request, possible conflict",
+			SG(request_info).request_method);
+		efree(content_type_normalized);
+		return;
+	}
+
+	/* Set up SAPI state for our handler */
+	SG(request_info).post_entry = post_entry;
+	SG(request_info).content_type_dup = estrdup(content_type);
+
+	/* For urlencoded content, we need to read the request body first */
+	if (post_entry->post_reader) {
+		if (!SG(request_info).request_body) {
+			epv_read_request_data();
+		}
+	}
+
+	/* IMPORTANT: rfc1867_post_handler writes directly to PG(http_globals)[TRACK_VARS_POST] */
+	/* So we need to temporarily swap it with our target array */
+	/* This is SAFE because:
+	 * 1. We only do this for PUT/DELETE/PATCH requests (not POST)
+	 * 2. At RINIT stage, POST array is still UNDEF
+	 * 3. We restore it immediately after processing
+	 * 4. When $_POST is later accessed, auto-global callback will initialize it properly
+	 */
+
+	/* Save the current POST array state */
+	ZVAL_COPY_VALUE(&saved_post_array, &PG(http_globals)[TRACK_VARS_POST]);
+
+	/* Verify we're not breaking an already-initialized POST array */
+	if (Z_TYPE(saved_post_array) != IS_UNDEF && Z_TYPE(saved_post_array) != IS_ARRAY) {
+		php_error_docref(NULL, E_WARNING,
+			"EPV: Unexpected POST array type during processing, data may be incomplete");
+		efree(content_type_normalized);
+		return;
+	}
+
+	/* Swap our target array into the POST position */
+	ZVAL_COPY_VALUE(&PG(http_globals)[TRACK_VARS_POST], arr);
+	swapped_post_array = 1;
+
+	/* Call the post handler through sapi_handle_post */
+	/* Note: sapi_handle_post will efree content_type_dup and set it to NULL */
+	sapi_handle_post(arr);
+
+	/* Restore the original POST array */
+	if (swapped_post_array) {
+		/* Copy data from our target array (which is now in PG POST position) back to arr */
+		ZVAL_COPY_VALUE(arr, &PG(http_globals)[TRACK_VARS_POST]);
+		/* Restore the original POST array */
+		ZVAL_COPY_VALUE(&PG(http_globals)[TRACK_VARS_POST], &saved_post_array);
+	}
+
+	/* Restore SAPI state */
+	SG(request_info).post_entry = saved_post_entry;
+	/* content_type_dup was already freed by sapi_handle_post */
+	SG(request_info).content_type_dup = saved_content_type_dup;
+
+	efree(content_type_normalized);
+}
+/* }}} */
+
+/* {{{ php_auto_globals_create_put
+ * Auto-global callback for $_PUT
+ */
+static zend_bool php_auto_globals_create_put(zend_string *name)
+{
+	zval *put_array_ptr = &EPV_G(http_globals)[TRACK_VARS_PUT];
+
+	/* If the array hasn't been initialized yet (e.g., not a PUT request), */
+	/* initialize it as an empty array */
+	if (Z_TYPE_P(put_array_ptr) == IS_UNDEF) {
+		array_init(put_array_ptr);
+	}
+
+	zend_hash_update(&EG(symbol_table), name, put_array_ptr);
+	Z_ADDREF_P(put_array_ptr);
+
+	return 0; /* don't rearm */
+}
+/* }}} */
+
+/* {{{ php_auto_globals_create_delete
+ * Auto-global callback for $_DELETE
+ */
+static zend_bool php_auto_globals_create_delete(zend_string *name)
+{
+	zval *delete_array_ptr = &EPV_G(http_globals)[TRACK_VARS_DELETE];
+
+	/* If the array hasn't been initialized yet (e.g., not a DELETE request), */
+	/* initialize it as an empty array */
+	if (Z_TYPE_P(delete_array_ptr) == IS_UNDEF) {
+		array_init(delete_array_ptr);
+	}
+
+	zend_hash_update(&EG(symbol_table), name, delete_array_ptr);
+	Z_ADDREF_P(delete_array_ptr);
+
+	return 0; /* don't rearm */
+}
+/* }}} */
+
+/* {{{ php_auto_globals_create_patch
+ * Auto-global callback for $_PATCH
+ */
+static zend_bool php_auto_globals_create_patch(zend_string *name)
+{
+	zval *patch_array_ptr = &EPV_G(http_globals)[TRACK_VARS_PATCH];
+
+	/* If the array hasn't been initialized yet (e.g., not a PATCH request), */
+	/* initialize it as an empty array */
+	if (Z_TYPE_P(patch_array_ptr) == IS_UNDEF) {
+		array_init(patch_array_ptr);
+	}
+
+	zend_hash_update(&EG(symbol_table), name, patch_array_ptr);
+	Z_ADDREF_P(patch_array_ptr);
+
+	return 0; /* don't rearm */
+}
+/* }}} */
+
+/* {{{ PHP_MINIT_FUNCTION
+ */
 PHP_MINIT_FUNCTION(epv)
 {
-		epv_register_auto_global(TSRMLS_C);
+	REGISTER_INI_ENTRIES();
 
-		return SUCCESS;
+	/* Register auto-globals */
+	zend_register_auto_global(
+		zend_string_init_interned("_PUT", sizeof("_PUT") - 1, 1),
+		0,
+		php_auto_globals_create_put
+	);
+
+	zend_register_auto_global(
+		zend_string_init_interned("_DELETE", sizeof("_DELETE") - 1, 1),
+		0,
+		php_auto_globals_create_delete
+	);
+
+	zend_register_auto_global(
+		zend_string_init_interned("_PATCH", sizeof("_PATCH") - 1, 1),
+		0,
+		php_auto_globals_create_patch
+	);
+
+	return SUCCESS;
 }
+/* }}} */
 
+/* {{{ PHP_MSHUTDOWN_FUNCTION
+ */
 PHP_MSHUTDOWN_FUNCTION(epv)
 {
-		return SUCCESS;
+	UNREGISTER_INI_ENTRIES();
+	return SUCCESS;
 }
+/* }}} */
 
+/* {{{ PHP_RINIT_FUNCTION
+ */
 PHP_RINIT_FUNCTION(epv)
 {
-		epv_init_auto_global(TSRMLS_C);
+	const char *request_method;
 
-		return SUCCESS;
+#if defined(COMPILE_DL_EPV) && defined(ZTS)
+	ZEND_TSRMLS_CACHE_UPDATE();
+#endif
+
+	/* DON'T initialize arrays here - they might have been set by early auto-global access */
+	/* We'll check and initialize them on-demand when processing the request method */
+
+	/* Check request method and pre-populate the appropriate array */
+	/* This must be done early, before any code accesses $_POST, */
+	/* because multipart request bodies can only be read once */
+	request_method = SG(request_info).request_method;
+
+	if (request_method) {
+		if (!strcasecmp(request_method, "PUT")) {
+			/* Check if array was already initialized by early auto-global access */
+			if (Z_TYPE(EPV_G(http_globals)[TRACK_VARS_PUT]) == IS_UNDEF) {
+				array_init(&EPV_G(http_globals)[TRACK_VARS_PUT]);
+			}
+			parse_http_method_data(&EPV_G(http_globals)[TRACK_VARS_PUT]);
+		} else if (!strcasecmp(request_method, "DELETE")) {
+			if (Z_TYPE(EPV_G(http_globals)[TRACK_VARS_DELETE]) == IS_UNDEF) {
+				array_init(&EPV_G(http_globals)[TRACK_VARS_DELETE]);
+			}
+			parse_http_method_data(&EPV_G(http_globals)[TRACK_VARS_DELETE]);
+		} else if (!strcasecmp(request_method, "PATCH")) {
+			if (Z_TYPE(EPV_G(http_globals)[TRACK_VARS_PATCH]) == IS_UNDEF) {
+				array_init(&EPV_G(http_globals)[TRACK_VARS_PATCH]);
+			}
+			parse_http_method_data(&EPV_G(http_globals)[TRACK_VARS_PATCH]);
+		}
+	}
+
+	return SUCCESS;
 }
+/* }}} */
 
+/* {{{ PHP_RSHUTDOWN_FUNCTION
+ */
 PHP_RSHUTDOWN_FUNCTION(epv)
 {
-		return SUCCESS;
-}
+	/* Clean up the arrays */
+	if (Z_TYPE(EPV_G(http_globals)[TRACK_VARS_PUT]) != IS_UNDEF) {
+		zval_ptr_dtor(&EPV_G(http_globals)[TRACK_VARS_PUT]);
+		ZVAL_UNDEF(&EPV_G(http_globals)[TRACK_VARS_PUT]);
+	}
+	if (Z_TYPE(EPV_G(http_globals)[TRACK_VARS_DELETE]) != IS_UNDEF) {
+		zval_ptr_dtor(&EPV_G(http_globals)[TRACK_VARS_DELETE]);
+		ZVAL_UNDEF(&EPV_G(http_globals)[TRACK_VARS_DELETE]);
+	}
+	if (Z_TYPE(EPV_G(http_globals)[TRACK_VARS_PATCH]) != IS_UNDEF) {
+		zval_ptr_dtor(&EPV_G(http_globals)[TRACK_VARS_PATCH]);
+		ZVAL_UNDEF(&EPV_G(http_globals)[TRACK_VARS_PATCH]);
+	}
 
+	return SUCCESS;
+}
+/* }}} */
+
+/* {{{ PHP_MINFO_FUNCTION
+ */
 PHP_MINFO_FUNCTION(epv)
 {
-		php_info_print_table_start();
-		php_info_print_table_colspan_header(2, "EPV (Extra Predefined Variables)");
-		php_info_print_table_row(2, "Version", EPV_VERSION );
-		php_info_print_table_end();
+	php_info_print_table_start();
+	php_info_print_table_header(2, "EPV Support", "enabled");
+	php_info_print_table_row(2, "Version", PHP_EPV_VERSION);
+	php_info_print_table_row(2, "Supported Methods", "PUT, DELETE, PATCH");
+	php_info_print_table_row(2, "Superglobal Variables", "$_PUT, $_DELETE, $_PATCH");
+	php_info_print_table_row(2, "Supported Content-Types", "application/x-www-form-urlencoded, multipart/form-data");
+	php_info_print_table_row(2, "File Uploads", "Supported (via $_FILES)");
+	php_info_print_table_end();
 
-		DISPLAY_INI_ENTRIES();
+	DISPLAY_INI_ENTRIES();
 }
+/* }}} */
 
-static zend_module_dep epv_deps[] = {
-		{NULL, NULL, NULL}
-};
-
+/* {{{ epv_module_entry
+ */
 zend_module_entry epv_module_entry = {
-		STANDARD_MODULE_HEADER_EX, 
-		NULL,
-		epv_deps,
-		"epv",
-		epv_functions,
-		PHP_MINIT(epv),
-		PHP_MSHUTDOWN(epv),
-		PHP_RINIT(epv),
-		PHP_RSHUTDOWN(epv),
-		PHP_MINFO(epv),
-		EPV_VERSION,
-		PHP_MODULE_GLOBALS(epv),
-		PHP_GINIT(epv),
-		NULL,
-		NULL,
-		STANDARD_MODULE_PROPERTIES_EX
+	STANDARD_MODULE_HEADER,
+	"epv",
+	NULL, /* functions */
+	PHP_MINIT(epv),
+	PHP_MSHUTDOWN(epv),
+	PHP_RINIT(epv),
+	PHP_RSHUTDOWN(epv),
+	PHP_MINFO(epv),
+	PHP_EPV_VERSION,
+	PHP_MODULE_GLOBALS(epv),
+	php_epv_init_globals,
+	NULL, /* globals dtor */
+	NULL, /* post deactivate */
+	STANDARD_MODULE_PROPERTIES_EX
 };
+/* }}} */
+
+#ifdef COMPILE_DL_EPV
+#ifdef ZTS
+ZEND_TSRMLS_CACHE_DEFINE()
+#endif
+ZEND_GET_MODULE(epv)
+#endif
