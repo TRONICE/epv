@@ -4,7 +4,7 @@
 extern zend_module_entry epv_module_entry;
 #define phpext_epv_ptr &epv_module_entry
 
-#define PHP_EPV_VERSION "2.0.0"
+#define PHP_EPV_VERSION "3.0.0"
 
 #ifdef PHP_WIN32
 #	define PHP_EPV_API __declspec(dllexport)

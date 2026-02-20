@@ -14,6 +14,7 @@
 #include "main/php_streams.h"
 #include "main/rfc1867.h"
 #include "main/php_content_types.h"
+#include "ext/json/php_json.h"
 
 ZEND_DECLARE_MODULE_GLOBALS(epv)
 
@@ -83,7 +84,8 @@ static void epv_read_request_data(void)
 
 		if (read_bytes > 0) {
 			/* Write to the stream */
-			if (php_stream_write(SG(request_info).request_body, buffer, read_bytes) != read_bytes) {
+			ssize_t written = php_stream_write(SG(request_info).request_body, buffer, read_bytes);
+			if (written < 0 || (size_t)written != read_bytes) {
 				/* Write failed, purge the stream */
 				php_stream_truncate_set_size(SG(request_info).request_body, 0);
 				php_error_docref(NULL, E_WARNING, "Request data can't be buffered; all data discarded");
@@ -110,9 +112,69 @@ static void epv_read_request_data(void)
 }
 /* }}} */
 
+/* {{{ parse_json_body
+ * Parse application/json request body into target array
+ */
+static void parse_json_body(zval *arr)
+{
+	php_stream *stream;
+	zend_string *body;
+	zval decoded;
+	zend_string *key;
+	zend_ulong idx;
+	zval *val;
+
+	/* Ensure request body is buffered */
+	if (!SG(request_info).request_body) {
+		epv_read_request_data();
+	}
+
+	stream = SG(request_info).request_body;
+	if (!stream) {
+		return;
+	}
+
+	php_stream_rewind(stream);
+
+	body = php_stream_copy_to_mem(stream, PHP_STREAM_COPY_ALL, 0);
+	if (!body || ZSTR_LEN(body) == 0) {
+		if (body) {
+			zend_string_release(body);
+		}
+		return;
+	}
+
+	ZVAL_UNDEF(&decoded);
+	if (php_json_decode_ex(&decoded, ZSTR_VAL(body), ZSTR_LEN(body),
+			PHP_JSON_OBJECT_AS_ARRAY, 512) == FAILURE
+		|| Z_TYPE(decoded) != IS_ARRAY) {
+		php_error_docref(NULL, E_WARNING,
+			"EPV: Failed to decode JSON body or body is not a JSON object/array");
+		zval_ptr_dtor(&decoded);
+		zend_string_release(body);
+		return;
+	}
+
+	zend_string_release(body);
+
+	/* Copy decoded JSON entries into target array */
+	ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(decoded), idx, key, val) {
+		zval copy;
+		ZVAL_COPY(&copy, val);
+		if (key) {
+			zend_hash_update(Z_ARRVAL_P(arr), key, &copy);
+		} else {
+			zend_hash_index_update(Z_ARRVAL_P(arr), idx, &copy);
+		}
+	} ZEND_HASH_FOREACH_END();
+
+	zval_ptr_dtor(&decoded);
+}
+/* }}} */
+
 /* {{{ parse_http_method_data
  * Parse request body data similar to POST handling
- * Supports multiple Content-Types: urlencoded and multipart
+ * Supports multiple Content-Types: urlencoded, multipart, and application/json
  */
 static void parse_http_method_data(zval *arr)
 {
@@ -150,6 +212,14 @@ static void parse_http_method_data(zval *arr)
 				*p = tolower(*p);
 				break;
 		}
+	}
+
+	/* Handle application/json before looking up in known_post_content_types,
+	 * since JSON is not registered as a SAPI post handler */
+	if (strcmp(content_type_normalized, "application/json") == 0) {
+		parse_json_body(arr);
+		efree(content_type_normalized);
+		return;
 	}
 
 	/* Look up the POST content handler */
@@ -408,7 +478,7 @@ PHP_MINFO_FUNCTION(epv)
 	php_info_print_table_row(2, "Version", PHP_EPV_VERSION);
 	php_info_print_table_row(2, "Supported Methods", "PUT, DELETE, PATCH");
 	php_info_print_table_row(2, "Superglobal Variables", "$_PUT, $_DELETE, $_PATCH");
-	php_info_print_table_row(2, "Supported Content-Types", "application/x-www-form-urlencoded, multipart/form-data");
+	php_info_print_table_row(2, "Supported Content-Types", "application/x-www-form-urlencoded, multipart/form-data, application/json");
 	php_info_print_table_row(2, "File Uploads", "Supported (via $_FILES)");
 	php_info_print_table_end();
 
