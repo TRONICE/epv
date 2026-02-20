@@ -120,9 +120,6 @@ static void parse_json_body(zval *arr)
 	php_stream *stream;
 	zend_string *body;
 	zval decoded;
-	zend_string *key;
-	zend_ulong idx;
-	zval *val;
 
 	/* Ensure request body is buffered */
 	if (!SG(request_info).request_body) {
@@ -146,10 +143,15 @@ static void parse_json_body(zval *arr)
 
 	ZVAL_UNDEF(&decoded);
 	if (php_json_decode_ex(&decoded, ZSTR_VAL(body), ZSTR_LEN(body),
-			PHP_JSON_OBJECT_AS_ARRAY, 512) == FAILURE
-		|| Z_TYPE(decoded) != IS_ARRAY) {
+			PHP_JSON_OBJECT_AS_ARRAY, PHP_JSON_PARSER_DEFAULT_DEPTH) == FAILURE) {
+		php_error_docref(NULL, E_WARNING, "EPV: Failed to decode JSON body");
+		zend_string_release(body);
+		return;
+	}
+
+	if (Z_TYPE(decoded) != IS_ARRAY) {
 		php_error_docref(NULL, E_WARNING,
-			"EPV: Failed to decode JSON body or body is not a JSON object/array");
+			"EPV: JSON body must be a JSON object or array, got scalar");
 		zval_ptr_dtor(&decoded);
 		zend_string_release(body);
 		return;
@@ -157,17 +159,7 @@ static void parse_json_body(zval *arr)
 
 	zend_string_release(body);
 
-	/* Copy decoded JSON entries into target array */
-	ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL(decoded), idx, key, val) {
-		zval copy;
-		ZVAL_COPY(&copy, val);
-		if (key) {
-			zend_hash_update(Z_ARRVAL_P(arr), key, &copy);
-		} else {
-			zend_hash_index_update(Z_ARRVAL_P(arr), idx, &copy);
-		}
-	} ZEND_HASH_FOREACH_END();
-
+	zend_hash_copy(Z_ARRVAL_P(arr), Z_ARRVAL(decoded), zval_add_ref);
 	zval_ptr_dtor(&decoded);
 }
 /* }}} */
